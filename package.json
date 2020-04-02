@@ -1,0 +1,13 @@
+{
+  "name": "kjcc",
+  "version": "1.0.0",
+  "dependencies": {
+    "@babel/generator": "^7.9.4",
+    "@babel/parser": "latest",
+    "@babel/types": "latest",
+    "babel-minify": "^0.5.1",
+    "extract-zip": "^2.0.0",
+    "java-class-parser": "^0.2.1",
+    "java-class-tools": "^1.3.2"
+  }
+}
