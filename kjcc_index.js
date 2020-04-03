@@ -11,13 +11,13 @@ async function compile(paths, mainClass = undefined) {
     const nodes = [];
 
     function getModuleDestination(className) {
-        if (innerClasses[className] && innerClasses[className].className !== className) {
+        /*if (innerClasses[className] && innerClasses[className].className !== className) {
             return BabelNodes.memberExpression(
                 getModuleDestination(innerClasses[className].className),
                 BabelNodes.stringLiteral(innerClasses[className].innerName),
                 true
             )
-        }
+        }*/
         let result = BabelNodes.identifier("MODULE");
         for (const packageName of className.split("/")) {
             result = BabelNodes.memberExpression(
@@ -31,14 +31,22 @@ async function compile(paths, mainClass = undefined) {
 
     const methodNames = {};
 
-    const innerClasses = {};
     expandPackages("java/lang/Object");
     nodes.push(
         BabelParser.parseExpression("MODULE[\"java\"][\"lang\"][\"Object\"] = function(){}")
     );
 
+    const clinits = [];
+
     function compileClassFile(path) {
         return new Promise((resolve, reject) => {
+            let requiredModules = [];
+            function addRequiredModules() {
+                for (const arg of arguments) {
+                    if (!(arg in requiredModules)) requiredModules.push(arg);
+                }
+            }
+
             let varCount = 0;
 
             function createVarName() {
@@ -65,21 +73,36 @@ async function compile(paths, mainClass = undefined) {
                     return result;
                 }
 
-                if (consumeChar() === "(") {
+                function parseType() {
+                    const char = consumeChar();
+                    if (["Z", "B", "C", "D", "F", "I", "J", "S", "V"].indexOf(char) !== -1) {
+                        return char;
+                    } else if (char === "L") {
+                        let param = "";
+                        while (nextChar() !== ";") param += consumeChar();
+                        return param + consumeChar();
+                    } else if (char === "[") {
+                        return "[" + parseType();
+                    } else throw new Error(char);
+                }
+
+                if (nextChar() === "(") {
+                    consumeChar();
                     params = [];
                     while (nextChar() !== ")") {
-                        let param = "";
-                        while (["Z", "B", "C", "D", "F", "I", "J", "S", ";"].indexOf((param += nextChar(), consumeChar())) === -1) ;
-                        params.push(param);
+                        params.push(parseType());
                     }
                     if (consumeChar() !== ")") throw new Error("wtf");
                 }
-                return {params, returnType: descriptor.substring(index)};
+                return {params, returnType: parseType()};
             }
 
             function methodToFunction(method) {
                 const name = string(method.name_index);
                 //if (name === "<init>") return constructorToFunction(method);
+                if (name+string(method.descriptor_index) === "signum(D)D") {
+                    debugger;
+                }
                 const statements = [
                     BabelNodes.variableDeclaration("const", [
                         BabelNodes.variableDeclarator(
@@ -160,9 +183,9 @@ async function compile(paths, mainClass = undefined) {
 
                 let stack = [];
 
-                function popStack() {
-                    if (stack.length < 1) throw new Error(`Cannot pop stack at method ${string(method.name_index)}`);
-                    return stack.pop();
+                function popStack(currentStack = stack) {
+                    if (currentStack.length < 1) throw new Error(`Cannot pop stack`);
+                    return currentStack.pop();
                 }
 
 
@@ -175,80 +198,191 @@ async function compile(paths, mainClass = undefined) {
                     return {ref: ref, className, name, descriptor, parsed};
                 }
 
-                function jmpToCondition(opcode) {
+                function jmpToCondition(opcode, currentStack = stack) {
                     switch (opcode) {
                         case Opcode.IFEQ:
-                            return(BabelNodes.binaryExpression("===", popStack(), BabelNodes.numericLiteral(0)));
+                            return(BabelNodes.binaryExpression("===", popStack(currentStack), BabelNodes.numericLiteral(0)));
                             break;
                         case Opcode.IFNE:
-                            return(BabelNodes.binaryExpression("!==", popStack(), BabelNodes.numericLiteral(0)));
+                            return(BabelNodes.binaryExpression("!==", popStack(currentStack), BabelNodes.numericLiteral(0)));
                             break;
                         case Opcode.IFGE:
-                            return(BabelNodes.binaryExpression(">=", popStack(), BabelNodes.numericLiteral(0)));
+                            return(BabelNodes.binaryExpression(">=", popStack(currentStack), BabelNodes.numericLiteral(0)));
                             break;
                         case Opcode.IFGT:
-                            return(BabelNodes.binaryExpression(">", popStack(), BabelNodes.numericLiteral(0)));
+                            return(BabelNodes.binaryExpression(">", popStack(currentStack), BabelNodes.numericLiteral(0)));
                             break;
                         case Opcode.IFLE:
-                            return(BabelNodes.binaryExpression("<=", popStack(), BabelNodes.numericLiteral(0)));
+                            return(BabelNodes.binaryExpression("<=", popStack(currentStack), BabelNodes.numericLiteral(0)));
                             break;
                         case Opcode.IFLT:
-                            return(BabelNodes.binaryExpression("<", popStack(), BabelNodes.numericLiteral(0)));
+                            return(BabelNodes.binaryExpression("<", popStack(currentStack), BabelNodes.numericLiteral(0)));
                             break;
                         case Opcode.IFNONNULL:
-                            return(BabelNodes.binaryExpression("!==", popStack(), BabelNodes.nullLiteral()));
+                            return(BabelNodes.binaryExpression("!==", popStack(currentStack), BabelNodes.nullLiteral()));
                             break;
                         case Opcode.IFNULL:
-                            return(BabelNodes.binaryExpression("===", popStack(), BabelNodes.nullLiteral()));
+                            return(BabelNodes.binaryExpression("===", popStack(currentStack), BabelNodes.nullLiteral()));
                             break;
                         case Opcode.IF_ACMPEQ:
                         case Opcode.IF_ICMPEQ:
-                            return(BabelNodes.binaryExpression("===", popStack(), popStack()));
+                            return(BabelNodes.binaryExpression("===", popStack(currentStack), popStack(currentStack)));
                             break;
                         case Opcode.IF_ACMPNE:
                         case Opcode.IF_ICMPNE:
-                            return(BabelNodes.binaryExpression("!==", popStack(), popStack()));
+                            return(BabelNodes.binaryExpression("!==", popStack(currentStack), popStack(currentStack)));
                             break;
                         case Opcode.IF_ICMPGT:
-                            return(BabelNodes.binaryExpression("<", popStack(), popStack()));
+                            return(BabelNodes.binaryExpression("<", popStack(currentStack), popStack(currentStack)));
                             break;
                         case Opcode.IF_ICMPLT:
-                            return(BabelNodes.binaryExpression(">", popStack(), popStack()));
+                            return(BabelNodes.binaryExpression(">", popStack(currentStack), popStack(currentStack)));
                             break;
                         case Opcode.IF_ICMPGE:
-                            return(BabelNodes.binaryExpression("<=", popStack(), popStack()));
+                            return(BabelNodes.binaryExpression("<=", popStack(currentStack), popStack(currentStack)));
                             break;
                         case Opcode.IF_ICMPLE:
-                            return(BabelNodes.binaryExpression(">=", popStack(), popStack()));
+                            return(BabelNodes.binaryExpression(">=", popStack(currentStack), popStack(currentStack)));
                             break;
                         case Opcode.GOTO:
                             return(BabelNodes.booleanLiteral(true));
                             break;
-                        default: throw new Error();
+                        default: throw new Error(opcode);
                     }
                 }
 
-                function compileOpcode(opcode, currentStatements = statements) {
+                function getInt() {
+                    return consumeByte() << 24 | consumeByte() << 16 | consumeByte() << 8 | consumeByte();
+                }
+
+                function compileOpcode(opcode, currentStatements = statements, currentStack = stack) {
                     function compileIfBranch(value) {
                         //console.log(value);
-                        const location = consumeByte()*256 + consumeByte() + index - 1;
+                        const location = consumeByte()*256 + consumeByte() + index - 3;
                         let then = [];
                         let otherwise = [];
+                        let thenStack = [];
+                        let otherwiseStack = [];
+                        let thenLoc, elseLoc;
+
                         while (index < location) {
                             if (Opcode.GOTO === nextByte() && toSignedShort(nextByte(1) * 256 + nextByte(2)) >= 0) {
                                 consumeByte();
                                 let gotoLocation = consumeByte() * 256 + consumeByte() + index - 3;
                                 while (index < gotoLocation) {
-                                    compileOpcode(consumeByte(), otherwise);
+                                    compileOpcode(consumeByte(), otherwise, otherwiseStack);
                                 }
+                            } else if (opcodeIsGoto(nextByte())) {
+                                let opcode = consumeByte();
+                                let destination = consumeByte() * 256 + consumeByte() + index - 3;
+                                let cond = jmpToCondition(opcode, currentStack);
+
                             } else {
-                                compileOpcode(consumeByte(), then);
+                                compileOpcode(consumeByte(), then, thenStack);
                             }
                         }
-                        currentStatements.push(BabelNodes.ifStatement(BabelNodes.unaryExpression("!", value), BabelNodes.blockStatement(then), BabelNodes.blockStatement(otherwise)));
+                        if (then.length === 0 && otherwise.length === 0 && otherwiseStack.length === 1 && otherwiseStack.length === 1) {
+                            currentStack.push(BabelNodes.conditionalExpression(value, popStack(otherwiseStack), popStack(thenStack)))
+                        } else {
+                            currentStatements.push(BabelNodes.ifStatement(value, BabelNodes.blockStatement(otherwise),  BabelNodes.blockStatement(then)));
+                        }
                     }
 
+                    //console.log(`At index ${index-1}:`);
+                    //console.log(currentStack);
+                    //console.log(opcode.toString(16));
                     switch (opcode) {
+                        case Opcode.LOOKUPSWITCH:
+                            (() => {
+                                const thisIdx = index-1;
+                                while (index % 4) consumeByte();
+                                const defaultLabel = getInt() + thisIdx;
+                                const numPairs = getInt();
+                                const pairs = [];
+                                if (numPairs > 0) {
+                                    for (let i = 0; i < numPairs; i++) {
+                                        pairs.push([getInt(), getInt()]);
+                                    }
+                                    pairs.sort((a, b) => a[1]-b[1]);
+                                    const val = popStack(currentStack);
+                                    let end;
+                                    const clauses = [];
+                                    for (let i = 0; i < numPairs; i++) {
+                                        clauses.push([]);
+                                        const thisEnd = (i+1 === numPairs) ? defaultLabel : pairs[i+1][1];
+                                        while (index < thisEnd+thisIdx) {
+                                            if (nextByte() === Opcode.GOTO) {
+                                                consumeByte();
+                                                let newEnd = consumeByte()*256 + consumeByte() + index - 3;
+                                                if (typeof end !== "undefined" && end !== newEnd) throw new Error();
+                                                end = newEnd;
+                                                clauses[i].push(BabelNodes.breakStatement());
+                                                break;
+                                            }
+                                            compileOpcode(consumeByte(), clauses[i]);
+                                        }
+                                    }
+                                    const defaultClause = [];
+                                    if (typeof end === "undefined") end = defaultLabel;
+                                    index = defaultLabel;
+                                    while (index < end) {
+                                        compileOpcode(consumeByte(), defaultClause);
+                                    }
+                                    statements.push(BabelNodes.switchStatement(
+                                        val,
+                                        [
+                                            ...clauses.map((clause, i) => {
+                                                return BabelNodes.switchCase(
+                                                    BabelNodes.numericLiteral(pairs[i][0]),
+                                                    clause
+                                                )
+                                            }),
+                                            BabelNodes.switchCase(null, defaultClause)
+                                        ]
+                                    ));
+                                }
+                            })();
+                            break;
+                        case Opcode.INSTANCEOF:
+                            (() => {
+                                const value = popStack(currentStack);
+                                const checkClassName = string(result.constant_pool[consumeByte()*256 + consumeByte()].name_index);
+                                currentStack.push(BabelNodes.binaryExpression("instanceof",
+                                    value,
+                                    getModuleDestination(checkClassName)));
+                            })();
+                            break;
+                        case Opcode.CHECKCAST:
+                            (() => {
+                                const value = popStack(currentStack);
+                                const checkClassName = string(result.constant_pool[consumeByte()*256 + consumeByte()].name_index);
+                                addRequiredModules("checkcast");
+                                currentStack.push(BabelNodes.callExpression(BabelNodes.identifier("__checkcast"), [
+                                    value,
+                                    BabelNodes.stringLiteral(checkClassName)
+                                ]));
+                            })();
+                            break;
+                        case Opcode.POP:
+                            popStack(currentStack);
+                            break;
+                        case Opcode.LCMP:
+                        case Opcode.DCMPL:
+                        case Opcode.FCMPL:
+                            (() => {
+                                addRequiredModules("spaceship");
+                                const value2 = popStack(currentStack), value1 = popStack(currentStack);
+                                currentStack.push(BabelNodes.callExpression(BabelNodes.identifier("__spaceship"), [ value1, value2 ]));
+                            })();
+                            break;
+                        case Opcode.FCMPG:
+                        case Opcode.DCMPG:
+                            (() => {
+                                addRequiredModules("spaceship");
+                                const value2 = popStack(currentStack), value1 = popStack(currentStack);
+                                currentStack.push(BabelNodes.callExpression(BabelNodes.identifier("__spaceship"), [ value2, value1 ]));
+                            })();
+                            break;
                         case Opcode.ILOAD:
                         case Opcode.ILOAD_0:
                         case Opcode.ILOAD_1:
@@ -256,7 +390,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.ILOAD_3:
                             (() => {
                                 let index = opcode === Opcode.ILOAD ? consumeByte() : opcode - Opcode.ILOAD_0;
-                                stack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
+                                currentStack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
                             })();
                             break;
                         case Opcode.LLOAD:
@@ -266,7 +400,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LLOAD_3:
                             (() => {
                                 let index = opcode === Opcode.LLOAD ? consumeByte() : opcode - Opcode.LLOAD_0;
-                                stack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
+                                currentStack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
                             })();
                             break;
                         case Opcode.FLOAD:
@@ -276,7 +410,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.FLOAD_3:
                             (() => {
                                 let index = opcode === Opcode.FLOAD ? consumeByte() : opcode - Opcode.FLOAD_0;
-                                stack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
+                                currentStack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
                             })();
                             break;
                         case Opcode.DLOAD:
@@ -286,7 +420,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.DLOAD_3:
                             (() => {
                                 let index = opcode === Opcode.DLOAD ? consumeByte() : opcode - Opcode.DLOAD_0;
-                                stack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
+                                currentStack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
                             })();
                             break;
                         case Opcode.ALOAD:
@@ -296,7 +430,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.ALOAD_3:
                             (() => {
                                 let index = opcode === Opcode.ALOAD ? consumeByte() : opcode - Opcode.ALOAD_0;
-                                stack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
+                                currentStack.push(BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true));
                             })();
                             break;
                         case Opcode.IMUL:
@@ -304,8 +438,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LMUL:
                         case Opcode.DMUL:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("*", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("*", first, second));
                             })();
                             break;
                         case Opcode.IMUL:
@@ -313,8 +447,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LMUL:
                         case Opcode.DMUL:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("*", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("*", first, second));
                             })();
                             break;
                         case Opcode.ISUB:
@@ -322,8 +456,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LSUB:
                         case Opcode.DSUB:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("-", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("-", first, second));
                             })();
                             break;
                         case Opcode.IADD:
@@ -331,8 +465,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LADD:
                         case Opcode.DADD:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("+", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("+", first, second));
                             })();
                             break;
                         case Opcode.IDIV:
@@ -340,8 +474,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LDIV:
                         case Opcode.DDIV:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("/", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("/", first, second));
                             })();
                             break;
                         case Opcode.IREM:
@@ -349,50 +483,50 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LREM:
                         case Opcode.DREM:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("%", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("%", first, second));
                             })();
                             break;
                         case Opcode.IAND:
                         case Opcode.LAND:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("&", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("&", first, second));
                             })();
                             break;
                         case Opcode.IOR:
                         case Opcode.LOR:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("|", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("|", first, second));
                             })();
                             break;
                         case Opcode.IXOR:
                         case Opcode.LXOR:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("^", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("^", first, second));
                             })();
                             break;
                         case Opcode.ISHL:
                         case Opcode.LSHL:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression("<<", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression("<<", first, second));
                             })();
                             break;
                         case Opcode.ISHR:
                         case Opcode.LSHR:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression(">>", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression(">>", first, second));
                             })();
                             break;
                         case Opcode.IUSHR:
                         case Opcode.LUSHR:
                             (() => {
-                                let second = popStack(), first = popStack();
-                                stack.push(BabelNodes.binaryExpression(">>>", first, second));
+                                let second = popStack(currentStack), first = popStack(currentStack);
+                                currentStack.push(BabelNodes.binaryExpression(">>>", first, second));
                             })();
                             break;
                         case Opcode.I2B:
@@ -411,6 +545,12 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.D2I:
                         case Opcode.D2F:
                             break;
+                        case Opcode.INEG:
+                        case Opcode.FNEG:
+                        case Opcode.LNEG:
+                        case Opcode.DNEG:
+                            currentStack.push(BabelNodes.unaryExpression("-", popStack(currentStack)));
+                            break;
                         case Opcode.RETURN:
                         case Opcode.ARETURN:
                         case Opcode.IRETURN:
@@ -418,7 +558,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.LRETURN:
                         case Opcode.DRETURN:
                             (() => {
-                                let value = opcode === Opcode.RETURN ? undefined : popStack();
+                                let value = opcode === Opcode.RETURN ? undefined : popStack(currentStack);
                                 currentStatements.push(BabelNodes.returnStatement(value))
                             })();
                             break;
@@ -427,18 +567,25 @@ async function compile(paths, mainClass = undefined) {
                                 const {parsed, name, className, descriptor} = parseMethodOrFieldRef();
                                 const paramCount = parsed.params.length;
                                 const args = [];
-                                for (let i = 0; i < paramCount; i++) args.push(popStack());
+                                for (let i = 0; i < paramCount; i++) args.push(popStack(currentStack));
+                                let finalName;
+                                if (methodNames[className]) {
+                                    finalName = methodNames[className][name+descriptor];
+                                } else {
+                                    console.warn(`Class ${className} is not defined, using default names`);
+                                    finalName = name;
+                                }
                                 const gen = BabelNodes.callExpression(
                                     BabelNodes.memberExpression(
                                         getModuleDestination(className),
-                                        BabelNodes.stringLiteral(methodNames[className][name+descriptor]),
+                                        BabelNodes.stringLiteral(finalName),
                                         true
                                     ),
                                     args.reverse()
                                 );
                                 if (parsed.returnType === "V") {
                                     currentStatements.push(BabelNodes.expressionStatement(gen))
-                                } else stack.push(gen);
+                                } else currentStack.push(gen);
                             })();
                             break;
                         case Opcode.INVOKEINTERFACE:
@@ -448,49 +595,57 @@ async function compile(paths, mainClass = undefined) {
                                 if (opcode === Opcode.INVOKEINTERFACE) { consumeByte(); consumeByte() }
                                 const paramCount = parsed.params.length;
                                 const args = [];
-                                for (let i = 0; i < paramCount; i++) args.push(popStack());
-                                const thiz = popStack();
+                                for (let i = 0; i < paramCount; i++) args.push(popStack(currentStack));
+                                const thiz = popStack(currentStack);
+                                let finalName;
+                                if (methodNames[className]) {
+                                    finalName = methodNames[className][name+descriptor];
+                                } else {
+                                    console.warn(`Class ${className} is not defined, using default names`);
+                                    finalName = name;
+                                }
                                 const gen = BabelNodes.callExpression(
-                                    BabelNodes.memberExpression(thiz, BabelNodes.identifier(methodNames[className][name + descriptor])),
+                                    BabelNodes.memberExpression(thiz, BabelNodes.identifier(finalName)),
                                     args.reverse()
                                 );
                                 if (parsed.returnType === "V") {
                                     currentStatements.push(BabelNodes.expressionStatement(gen))
-                                } else stack.push(gen);
+                                } else currentStack.push(gen);
                             })();
                             break;
+                        case Opcode.ICONST_M1:
                         case Opcode.ICONST_0:
                         case Opcode.ICONST_1:
                         case Opcode.ICONST_2:
                         case Opcode.ICONST_3:
                         case Opcode.ICONST_4:
                         case Opcode.ICONST_5:
-                            stack.push(BabelNodes.numericLiteral(opcode - Opcode.ICONST_0));
+                            currentStack.push(BabelNodes.numericLiteral(opcode - Opcode.ICONST_0));
                             break;
                         case Opcode.LCONST_0:
                         case Opcode.LCONST_1:
-                            stack.push(BabelNodes.numericLiteral(opcode - Opcode.LCONST_0));
+                            currentStack.push(BabelNodes.numericLiteral(opcode - Opcode.LCONST_0));
                             break;
                         case Opcode.FCONST_0:
                         case Opcode.FCONST_1:
                         case Opcode.FCONST_2:
-                            stack.push(BabelNodes.numericLiteral(opcode - Opcode.FCONST_0));
+                            currentStack.push(BabelNodes.numericLiteral(opcode - Opcode.FCONST_0));
                             break;
                         case Opcode.DCONST_0:
                         case Opcode.DCONST_1:
-                            stack.push(BabelNodes.numericLiteral(opcode - Opcode.DCONST_0));
+                            currentStack.push(BabelNodes.numericLiteral(opcode - Opcode.DCONST_0));
                             break;
                         case Opcode.BIPUSH:
-                            stack.push(BabelNodes.numericLiteral(consumeByte()));
+                            currentStack.push(BabelNodes.numericLiteral(consumeByte()));
                             break;
                         case Opcode.SIPUSH:
-                            stack.push(BabelNodes.numericLiteral(consumeByte() * 256 + consumeByte()));
+                            currentStack.push(BabelNodes.numericLiteral(consumeByte() * 256 + consumeByte()));
                             break;
                         case Opcode.NEW:
                             (() => {
                                 const idx = consumeByte() * 256 + consumeByte();
                                 const className = string(result.constant_pool[idx].name_index);
-                                stack.push(BabelNodes.callExpression(
+                                currentStack.push(BabelNodes.callExpression(
                                     BabelParser.parseExpression("Object.setPrototypeOf"),
                                     [
                                         BabelNodes.objectExpression([]),
@@ -504,9 +659,9 @@ async function compile(paths, mainClass = undefined) {
                             break;
                         case Opcode.DUP:
                             (() => {
-                                const value = popStack();
+                                const value = popStack(currentStack);
                                 if (BabelNodes.isIdentifier(value)) {
-                                    stack.push(value); stack.push(value);
+                                    currentStack.push(value); currentStack.push(value);
                                     return;
                                 }
                                 const varName = createVarName();
@@ -514,20 +669,32 @@ async function compile(paths, mainClass = undefined) {
                                     BabelNodes.identifier(varName),
                                     value
                                 )]));
-                                stack.push(BabelNodes.identifier(varName));
-                                stack.push(BabelNodes.identifier(varName));
+                                currentStack.push(BabelNodes.identifier(varName));
+                                currentStack.push(BabelNodes.identifier(varName));
                             })();
                             break;
                         case Opcode.INVOKESPECIAL:
                             (() => {
-                                const {parsed: {params: {length: paramLength}}, className} = parseMethodOrFieldRef();
+                                const {parsed: {params: {length: paramLength}}, descriptor, className} = parseMethodOrFieldRef();
                                 const args = [];
-                                for (let i = 0; i < paramLength; i++) args.push(stack.pop());
-                                const value = popStack();
+                                for (let i = 0; i < paramLength; i++) args.push(currentStack.pop());
+                                const value = popStack(currentStack);
+                                let constr = getModuleDestination(className);
+                                if (typeof methodNames[className] !== "undefined") {
+                                    if (methodNames[className]["<init>" + descriptor] !== "<init>") {
+                                        constr = BabelNodes.memberExpression(
+                                            constr,
+                                            BabelNodes.stringLiteral(methodNames[className]["<init>" + descriptor]),
+                                            true
+                                        );
+                                    }
+                                } else {
+                                    console.warn(`Undefined class ${className}, using default constructor`);
+                                }
                                 currentStatements.push(
                                     BabelNodes.expressionStatement(BabelNodes.callExpression(
                                         BabelNodes.memberExpression(
-                                            getModuleDestination(className),
+                                            constr,
                                             BabelNodes.identifier("apply")
                                         ),
                                         [value, BabelNodes.arrayExpression(args.reverse())]
@@ -546,7 +713,7 @@ async function compile(paths, mainClass = undefined) {
                                     BabelNodes.expressionStatement(BabelNodes.assignmentExpression(
                                         "=",
                                         BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true),
-                                        popStack()
+                                        popStack(currentStack)
                                     ))
                                 );
                             })();
@@ -562,7 +729,7 @@ async function compile(paths, mainClass = undefined) {
                                     BabelNodes.expressionStatement(BabelNodes.assignmentExpression(
                                         "=",
                                         BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true),
-                                        popStack()
+                                        popStack(currentStack)
                                     ))
                                 );
                             })();
@@ -578,7 +745,7 @@ async function compile(paths, mainClass = undefined) {
                                     BabelNodes.expressionStatement(BabelNodes.assignmentExpression(
                                         "=",
                                         BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true),
-                                        popStack()
+                                        popStack(currentStack)
                                     ))
                                 );
                             })();
@@ -594,7 +761,7 @@ async function compile(paths, mainClass = undefined) {
                                     BabelNodes.expressionStatement(BabelNodes.assignmentExpression(
                                         "=",
                                         BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true),
-                                        popStack()
+                                        popStack(currentStack)
                                     ))
                                 );
                             })();
@@ -610,7 +777,7 @@ async function compile(paths, mainClass = undefined) {
                                     BabelNodes.expressionStatement(BabelNodes.assignmentExpression(
                                         "=",
                                         BabelNodes.memberExpression(BabelNodes.identifier("__vars"), BabelNodes.numericLiteral(index), true),
-                                        popStack()
+                                        popStack(currentStack)
                                     ))
                                 );
                             })();
@@ -618,7 +785,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.GETSTATIC:
                             (() => {
                                 const {name, className} = parseMethodOrFieldRef();
-                                stack.push(BabelNodes.memberExpression(
+                                currentStack.push(BabelNodes.memberExpression(
                                     getModuleDestination(className),
                                     BabelNodes.stringLiteral(name),
                                     true
@@ -635,7 +802,7 @@ async function compile(paths, mainClass = undefined) {
                                             BabelNodes.stringLiteral(name),
                                             true
                                         ),
-                                        popStack()
+                                        popStack(currentStack)
                                     ))
                                 );
                             })();
@@ -643,8 +810,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.GETFIELD:
                             (() => {
                                 const {name} = parseMethodOrFieldRef();
-                                stack.push(BabelNodes.memberExpression(
-                                    popStack(),
+                                currentStack.push(BabelNodes.memberExpression(
+                                    popStack(currentStack),
                                     BabelNodes.stringLiteral(name),
                                     true
                                 ));
@@ -653,8 +820,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.PUTFIELD:
                             (() => {
                                 const {name} = parseMethodOrFieldRef();
-                                const value = popStack();
-                                const object = popStack();
+                                const value = popStack(currentStack);
+                                const object = popStack(currentStack);
                                 currentStatements.push(
                                     BabelNodes.expressionStatement(BabelNodes.assignmentExpression("=", BabelNodes.memberExpression(
                                         object,
@@ -674,7 +841,7 @@ async function compile(paths, mainClass = undefined) {
                             (() => {
                                 const constant = result.constant_pool[consumeByte()*256 + consumeByte()];
                                 if (constant.tag === ConstantType.LONG) {
-                                    stack.push(
+                                    currentStack.push(
                                         BabelNodes.numericLiteral(
                                             constant.high_bytes * (2 ** 32) + constant.low_bytes
                                         )
@@ -695,21 +862,21 @@ async function compile(paths, mainClass = undefined) {
                                         view.setUint8(i, b);
                                     });
                                     const num = view.getFloat64(0);
-                                    stack.push(
+                                    currentStack.push(
                                         BabelNodes.numericLiteral(num)
                                     )
                                 }
                             })();
                             break;
                         case Opcode.ACONST_NULL:
-                            stack.push(BabelNodes.nullLiteral());
+                            currentStack.push(BabelNodes.nullLiteral());
                             break;
                         case Opcode.ANEWARRAY:
                             consumeByte();
                         case Opcode.NEWARRAY:
                             consumeByte();
                             (() => {
-                                const count = popStack();
+                                const count = popStack(currentStack);
                                 const varName = createVarName();
                                 const counterName = createVarName();
                                 const countVar = createVarName();
@@ -749,11 +916,12 @@ async function compile(paths, mainClass = undefined) {
                                             )
                                         )
                                     )
-                                )
+                                );
+                                currentStack.push(BabelNodes.identifier(varName));
                             })();
                             break;
                         case Opcode.ARRAYLENGTH:
-                            stack.push(BabelNodes.memberExpression(popStack(), BabelNodes.identifier("length")));
+                            currentStack.push(BabelNodes.memberExpression(popStack(currentStack), BabelNodes.identifier("length")));
                             break;
                         case Opcode.AALOAD:
                         case Opcode.IALOAD:
@@ -764,8 +932,8 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.SALOAD:
                         case Opcode.BALOAD:
                             (() => {
-                                const index = popStack();
-                                stack.push(BabelNodes.memberExpression(popStack(), index, true));
+                                const index = popStack(currentStack);
+                                currentStack.push(BabelNodes.memberExpression(popStack(currentStack), index, true));
                             })();
                             break;
                         case Opcode.AASTORE:
@@ -777,18 +945,18 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.SASTORE:
                         case Opcode.BASTORE:
                             (() => {
-                                const val = popStack();
-                                const index = popStack();
+                                const val = popStack(currentStack);
+                                const index = popStack(currentStack);
                                 currentStatements.push(BabelNodes.expressionStatement(
-                                    BabelNodes.assignmentExpression("=", BabelNodes.memberExpression(popStack(), index, true), val)
+                                    BabelNodes.assignmentExpression("=", BabelNodes.memberExpression(popStack(currentStack), index, true), val)
                                 ));
                             })();
                             break;
                         case Opcode.ATHROW:
                             (() => {
-                                const val = popStack();
+                                const val = popStack(currentStack);
                                 currentStatements.push(BabelNodes.throwStatement(val));
-                                stack = [val];
+                                currentStack = [val];
                             })();
                             break;
                         case Opcode.IFEQ:
@@ -808,7 +976,7 @@ async function compile(paths, mainClass = undefined) {
                         case Opcode.IF_ICMPGE:
                         case Opcode.IF_ICMPLE:
                         case Opcode.GOTO:
-                            compileIfBranch(jmpToCondition(opcode));
+                            compileIfBranch(jmpToCondition(opcode, currentStack));
                             break;
                         case Opcode.BREAKPOINT:
                             currentStatements.push(BabelNodes.debuggerStatement());
@@ -829,16 +997,16 @@ async function compile(paths, mainClass = undefined) {
                                 while (index < lastIndex) {
                                     if (opcodeIsGoto(nextByte()) && (toSignedShort(nextByte(1)*256 + nextByte(2))+index === lastIndex+3 || toSignedShort(nextByte(1)*256 + nextByte(2))+index === idx)) {
                                         if (toSignedShort(nextByte(1)*256 + nextByte(2))+index === lastIndex+3) {
-                                            whileStatements.push(BabelNodes.ifStatement(jmpToCondition(nextByte()), BabelNodes.breakStatement()));
+                                            whileStatements.push(BabelNodes.ifStatement(jmpToCondition(nextByte(), currentStack), BabelNodes.breakStatement()));
                                         } else if (toSignedShort(nextByte(1)*256 + nextByte(2))+index === idx) {
-                                            whileStatements.push(BabelNodes.ifStatement(jmpToCondition(nextByte()), BabelNodes.continueStatement()));
+                                            whileStatements.push(BabelNodes.ifStatement(jmpToCondition(nextByte(), currentStack), BabelNodes.continueStatement()));
                                         }
                                         consumeByte(); consumeByte(); consumeByte();
                                     } else {
                                         compileOpcode(consumeByte(), whileStatements);
                                     }
                                 }
-                                whileStatements.push(BabelNodes.ifStatement(BabelNodes.unaryExpression("!", jmpToCondition(nextByte())), BabelNodes.breakStatement()));
+                                whileStatements.push(BabelNodes.ifStatement(BabelNodes.unaryExpression("!", jmpToCondition(nextByte(), currentStack)), BabelNodes.breakStatement()));
                                 consumeByte(); consumeByte(); consumeByte();
                                 currentStatements.push(BabelNodes.whileStatement(BabelNodes.booleanLiteral(true), BabelNodes.blockStatement(whileStatements)));
                             })();
@@ -863,51 +1031,98 @@ async function compile(paths, mainClass = undefined) {
                             console.log(index-1);
                             throw new Error(`Undefined instruction '${opcode}' at method ${className}.${string(method.name_index)}`);
                     }
+                    //console.log(currentStack);
+
+                    function parseLDC(__idx) {
+                        (() => {
+                            const constant = result.constant_pool[__idx];
+                            if (constant.tag === ConstantType.STRING) {
+                                currentStack.push(
+                                    BabelNodes.stringLiteral(
+                                        string(constant.string_index)
+                                    )
+                                );
+                            } else if (constant.tag === ConstantType.INTEGER) {
+                                currentStack.push(
+                                    BabelNodes.numericLiteral(
+                                        constant.bytes
+                                    )
+                                )
+                            } else if (constant.tag === ConstantType.FLOAT) {
+                                const buf = new ArrayBuffer(4);
+                                const view = new DataView(buf);
+                                [
+                                    constant.bytes >> 24,
+                                    constant.bytes >> 16 & 0xFF,
+                                    constant.bytes >>  8 & 0xFF,
+                                    constant.bytes       & 0xFF
+                                ].forEach(function (b, i) {
+                                    view.setUint8(i, b);
+                                });
+                                const num = view.getFloat32(0);
+                                currentStack.push(
+                                    BabelNodes.numericLiteral(num)
+                                )
+                            } else throw new Error("Bad LDC");
+                        })();
+                    }
                 }
 
                 while (typeof nextByte() !== "undefined") {
                     const opcode = consumeByte();
-                    compileOpcode(opcode);
+                    try {
+                        compileOpcode(opcode);
+                    } catch (e) {
+                        console.warn(`At method ${className}.${string(method.name_index)}${string(method.descriptor_index)}:`);
+                        throw e;
+                    }
                 }
 
-                function parseLDC(__idx) {
-                    (() => {
-                        const constant = result.constant_pool[__idx];
-                        if (constant.tag === ConstantType.STRING) {
-                            stack.push(
-                                BabelNodes.stringLiteral(
-                                    string(constant.string_index)
+                const moduleStatements = [];
+
+                for (const module of requiredModules) {
+                    switch (module) {
+                        case "spaceship":
+                            moduleStatements.push(
+                                BabelNodes.functionDeclaration(
+                                    BabelNodes.identifier("__spaceship"),
+                                    [ BabelNodes.identifier("a"), BabelNodes.identifier("b") ],
+                                    BabelNodes.blockStatement([
+                                        BabelNodes.returnStatement(
+                                            BabelNodes.conditionalExpression(
+                                                BabelNodes.binaryExpression("<", BabelNodes.identifier("a"), BabelNodes.identifier("b")),
+                                                BabelNodes.numericLiteral(1),
+                                                BabelNodes.conditionalExpression(
+                                                    BabelNodes.binaryExpression(">", BabelNodes.identifier("a"), BabelNodes.identifier("b")),
+                                                    BabelNodes.numericLiteral(-1),
+                                                    BabelNodes.numericLiteral(1)
+                                                )
+                                            )
+                                        )
+                                    ])
                                 )
                             );
-                        } else if (constant.tag === ConstantType.INTEGER) {
-                            stack.push(
-                                BabelNodes.numericLiteral(
-                                    constant.bytes
-                                )
-                            )
-                        } else if (constant.tag === ConstantType.FLOAT) {
-                            const buf = new ArrayBuffer(4);
-                            const view = new DataView(buf);
-                            [
-                                constant.bytes >> 24,
-                                constant.bytes >> 16 & 0xFF,
-                                constant.bytes >>  8 & 0xFF,
-                                constant.bytes       & 0xFF
-                            ].forEach(function (b, i) {
-                                view.setUint8(i, b);
-                            });
-                            const num = view.getFloat32(0);
-                            stack.push(
-                                BabelNodes.numericLiteral(num)
-                            )
-                        }
-                    })();
+                            break;
+                        case "checkcast":
+                            moduleStatements.push(
+                                BabelNodes.expressionStatement(BabelParser.parseExpression(`
+                                    function __checkcast(val, clazz) {
+                                        if (val instanceof clazz) {
+                                            return val;
+                                        } else {
+                                            throw new Error(\`\${value} cannot be cast to \${clazz}\`);
+                                        }
+                                    }
+                                `))
+                            );
+                            break;
+                        default: throw new Error(module);
+                    }
                 }
-
 
                 return `function(){${generate({
                     type: "Program",
-                    body: statements
+                    body: [...moduleStatements, ...statements]
                 }).code}}`;
             }
 
@@ -915,6 +1130,7 @@ async function compile(paths, mainClass = undefined) {
             console.log(`Compiling ${className}...`);
             const resNodes = [];
             const constructors = [];
+            let clinit = false;
             const dest = getModuleDestination(className);
             for (let method of result.methods) {
                 const name = string(method.name_index);
@@ -922,6 +1138,8 @@ async function compile(paths, mainClass = undefined) {
                 if (name === "<init>") {
                     constructors.push(method);
                     continue;
+                } else if (name === "<clinit>") {
+                    clinit = true;
                 }
                 const isStatic = method.access_flags & Modifier.STATIC;
                 const f = methodToFunction(method);
@@ -955,7 +1173,12 @@ async function compile(paths, mainClass = undefined) {
                     )
                 )
             );
-
+            for (let i = 1; i < constructors.length; i++) {
+                nodes.push(BabelNodes.assignmentExpression("=",
+                    BabelNodes.memberExpression(dest, BabelNodes.stringLiteral("constructor_"+i), true),
+                    BabelParser.parseExpression(methodToFunction(constructors[i]))));
+            }
+            if (clinit) clinits.push(dest);
             nodes.push(...resNodes);
             console.log(`${className} compiled`);
             resolve();
@@ -1007,7 +1230,6 @@ async function compile(paths, mainClass = undefined) {
     const readingResults = {};
 
     function expandPackages(className) {
-        if (className in innerClasses) return;
         let result = BabelNodes.identifier("MODULE");
         for (const packageName of className.split("/")) {
             result = BabelNodes.memberExpression(
@@ -1016,19 +1238,6 @@ async function compile(paths, mainClass = undefined) {
                 true
             );
             nodes.push(BabelNodes.assignmentExpression("=", result, BabelNodes.objectExpression([])));
-        }
-        let val;
-        if (val = Object.values(innerClasses).find(val => val.className === className)) {
-            nodes.push(
-                BabelNodes.assignmentExpression("=",
-                    BabelNodes.memberExpression(
-                        getModuleDestination(className),
-                        BabelNodes.stringLiteral(val.innerName),
-                        true
-                    ),
-                    BabelNodes.objectExpression([])
-                )
-            );
         }
     }
 
@@ -1039,31 +1248,34 @@ async function compile(paths, mainClass = undefined) {
         const className = string(result.constant_pool[result.this_class].name_index);
         console.log(`Looking through ${className}`);
         for (const attribute of result.attributes) {
-            if (string(attribute.attribute_name_index) === "InnerClasses") {
+            /*if (string(attribute.attribute_name_index) === "InnerClasses") {
                 for (const { inner_class_info_index, inner_name_index } of attribute.classes) {
                     const innerName = string(result.constant_pool[inner_class_info_index].name_index);
                     if (className !== mainClass) {
                         innerClasses[innerName] = {className, innerName: inner_name_index ? string(inner_name_index) : "AnonymousInner"};
                     }
                 }
-            }
+            }*/
         }
         expandPackages(className);
 
+        let constructors = 0;
         methodNames[className] = {};
         for (const method of result.methods) {
             const name = string(method.name_index);
             const descriptor = string(method.descriptor_index);
             const fullDescriptor = name + descriptor;
             if (Object.values(methodNames[className]).indexOf(name) !== -1 || method.access_flags & Modifier.PRIVATE) {
-                let result = name + "_" + Buffer.from(descriptor).toString("base64");
+                let salt = Buffer.from(descriptor).toString("base64");
+                if (salt.length > 5) salt = salt.substring(0, 5);
+                let result = name + "_" + salt;
                 while (result.indexOf("=") !== -1) result = result.replace("=", "_");
-                methodNames[className][fullDescriptor] = result;
+                methodNames[className][fullDescriptor] = name === "<init>" ? "constructor_" + ++constructors : result;
             } else {
                 methodNames[className][fullDescriptor] = name;
             }
         }
-        console.log(methodNames[className]);
+        //console.log(methodNames[className]);
         console.log(`Looked through ${className}`)
     }
 
@@ -1090,6 +1302,18 @@ async function compile(paths, mainClass = undefined) {
         await compilePath(path);
     }
 
+    for (const val of clinits) {
+        nodes.push(
+            BabelNodes.callExpression(
+                BabelNodes.memberExpression(
+                    val,
+                    BabelNodes.stringLiteral("<clinit>"),
+                    true
+                ), []
+            )
+        )
+    }
+
     if (mainClass) {
         nodes.push(
             BabelNodes.callExpression(
@@ -1101,7 +1325,9 @@ async function compile(paths, mainClass = undefined) {
                     ),
                     BabelNodes.identifier("main")
                 ),
-                []
+                [
+                    BabelNodes.arrayExpression([])
+                ]
             )
         )
     }
